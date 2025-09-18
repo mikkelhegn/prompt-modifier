@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
-use std::{collections::HashMap, path::Path};
-use tokio::{fs, io::AsyncWriteExt};
+use std::{collections::HashMap, path::Path, str::FromStr};
+use tokio::{fs, io::{self, AsyncWriteExt}};
 use uuid::Uuid;
 use wac_graph::{types::Package, CompositionGraph, EncodeOptions};
 use regex::Regex;
@@ -21,7 +21,11 @@ async fn main() -> Result<()> {
 
     println!("Processing {}, as job-id: {:?}", args.file, uuid);
 
-    let prepped_app = prep_app(&args.file, uuid).await?;
+    //let prepped_app = prep_app(&args.file, uuid).await?;
+
+    let files_path = Path::new(&args.file);
+
+    let prepped_app = prep_app_modules(&String::from_str(files_path.parent().unwrap().to_str().unwrap())?, uuid).await?;
 
     let component = build_python_component(&prepped_app.as_str(), uuid).await;
 
@@ -133,6 +137,31 @@ async fn prep_app(file: &String, uuid: Uuid) -> Result<String> {
     let path_string = format!("temp/{}/component-input/app.py", uuid);
     let output_file_path = Path::new(&path_string);
     save_to_disk(output_file_path, output_file_content.as_bytes()).await.expect("Failed to save file");
+
+    // TODO return file content as bytes
+    Ok(path_string)
+}
+
+async fn prep_app_modules(directory: &String, uuid: Uuid) -> Result<String> {
+    let template_path = "python_template_modules.liquid";
+    let template = fs::read_to_string(template_path).await.expect("Failed to read teamplaet file");
+
+    // Build imports
+    let imports = format!(
+        "from {} import before\nfrom {} import after",
+        "before", "after"
+    );
+
+    // Replace {{ imports }}
+    let output_file_content = template.replace("{{ imports }}", &imports);
+
+    // Save on temp disk with UUID-based path
+    let path_string = format!("temp/{}/component-input/app.py", uuid);
+    let output_file_path = Path::new(&path_string);
+    save_to_disk(output_file_path, output_file_content.as_bytes()).await.expect("Failed to save file");
+
+    // Copy all modules
+    copy_dir_contents(directory, output_file_path.parent().unwrap().to_str().expect("Failed to get parent dir")).await?;
 
     // TODO return file content as bytes
     Ok(path_string)
@@ -292,4 +321,24 @@ fn indent_lines(body: &str, n_spaces: usize) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+async fn copy_dir_contents(src: &str, dst: &str) -> io::Result<()> {
+    let src_path = Path::new(src);
+    let dst_path = Path::new(dst);
+
+    // Ensure destination directory exists
+    fs::create_dir_all(dst_path).await?;
+
+    let mut entries = fs::read_dir(src_path).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.is_file() {
+            let file_name = entry.file_name();
+            let dst_file = dst_path.join(file_name);
+            fs::copy(&path, &dst_file).await?;
+        }
+    }
+
+    Ok(())
 }

@@ -1,4 +1,5 @@
-from app import before, after
+from examples.python.before import before
+from examples.python.after import after
 
 def test_prompts():
     assert before("Hello!") == "Hello! Make sure your reply is appropriate with children under the age of 10."
