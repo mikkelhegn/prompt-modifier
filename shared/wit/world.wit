@@ -1,10 +1,14 @@
-package component:stringprocessor;
+package component:promptprocessor@0.0.1;
 
-interface stringprocessing {
-    before: func(input: string) -> string;
-    after: func(input: string) -> string;
+interface promptmodification {
+    before: func(userprompt: string) -> string;
+    after: func(promptresult: string) -> string;
 }
 
-world stringprocessor {
-  export stringprocessing;
+world promptmodifier {
+  export promptmodification;
+}
+
+world promptmodifierhost {
+  import promptmodification;
 }

@@ -9,3 +9,6 @@ clap = { version = "4.5", features = ["derive"] }
 componentize-py = { path = "../../../fermyon/componentize-py/" }
 tempfile = "3.20.0"
 tokio = "1.47.1"
+uuid = { version = "1.4", features = ["v4"] }
+wac-graph = { git = "https://github.com/bytecodealliance/wac", version = "0.9.0-dev" }
+regex = "1"

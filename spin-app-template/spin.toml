@@ -11,7 +11,7 @@ route = "/..."
 component = "temp-goal-rust"
 
 [component.temp-goal-rust]
-source = "target/wasm32-wasip2/release/temp_goal_rust.wasm"
+source = "composed.wasm"
 ai_models = ["llama2-chat"]
 [component.temp-goal-rust.build]
 command = "cargo build --target wasm32-wasip2 --release"

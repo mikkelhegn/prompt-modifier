@@ -12,5 +12,6 @@ crate-type = ["cdylib"]
 [dependencies]
 anyhow = "1"
 spin-sdk = "3.1.0"
+wit-bindgen = "0.44.0"
 
 [workspace]

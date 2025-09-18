@@ -1,0 +1,7 @@
+import promptmodifier.wit_world
+class Promptmodification(promptmodifier.wit_world.WitWorld):
+    def before(self, userprompt: str) -> str:
+{{ before_code }}
+
+    def after(self, promptresult: str) -> str:
+{{ after_code }}
