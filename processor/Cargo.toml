@@ -1,0 +1,11 @@
+[package]
+name = "string-processor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5", features = ["derive"] }
+componentize-py = { path = "../../../fermyon/componentize-py/" }
+tempfile = "3.20.0"
+tokio = "1.47.1"

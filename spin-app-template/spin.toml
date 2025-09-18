@@ -1,0 +1,18 @@
+spin_manifest_version = 2
+
+[application]
+name = "temp-goal-rust"
+version = "0.1.0"
+authors = ["Mikkel Mørk Hegnhøj <mikkel@fermyon.com>"]
+description = ""
+
+[[trigger.http]]
+route = "/..."
+component = "temp-goal-rust"
+
+[component.temp-goal-rust]
+source = "target/wasm32-wasip2/release/temp_goal_rust.wasm"
+ai_models = ["llama2-chat"]
+[component.temp-goal-rust.build]
+command = "cargo build --target wasm32-wasip2 --release"
+watch = ["src/**/*.rs", "Cargo.toml"]

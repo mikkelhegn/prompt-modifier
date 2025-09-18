@@ -1,0 +1,10 @@
+package component:stringprocessor;
+
+interface stringprocessing {
+    before: func(input: string) -> string;
+    after: func(input: string) -> string;
+}
+
+world stringprocessor {
+  export stringprocessing;
+}

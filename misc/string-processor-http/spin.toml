@@ -1,0 +1,21 @@
+spin_manifest_version = 2
+
+[application]
+name = "string-processor-http"
+version = "0.1.0"
+authors = ["Mikkel Mørk Hegnhøj <mikkel@fermyon.com>"]
+description = ""
+
+[[trigger.http]]
+route = "/..."
+component = "string-processor-http"
+
+[component.string-processor-http]
+source = "target/wasm32-wasip1/release/string_processor_http.wasm"
+allowed_outbound_hosts = []
+[component.string-processor-http.build]
+command = "cargo build --target wasm32-wasip1 --release"
+watch = ["src/**/*.rs", "Cargo.toml"]
+
+[component.string-processor-http.dependencies]
+"component:stringprocessor/stringprocessing" = { path = "../component.wasm" }
