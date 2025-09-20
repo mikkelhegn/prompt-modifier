@@ -30,8 +30,13 @@ async fn main() -> Result<()> {
             println!("This is a .wasm file, going straight to composition");
 
             // Generate the composed component using WAC
-            let composed_component = compose_components(files_path.to_str().expect("Coudl not extract wasm file path")).await;
-            
+            let composed_component = compose_components(
+                files_path
+                    .to_str()
+                    .expect("Coudl not extract wasm file path"),
+            )
+            .await;
+
             println!("Result: {}", composed_component.unwrap());
             Ok(())
         }
