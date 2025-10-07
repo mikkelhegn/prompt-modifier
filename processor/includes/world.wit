@@ -1,0 +1,14 @@
+package component:promptprocessor@0.0.1;
+
+interface promptmodification {
+    before: func(userprompt: string) -> string;
+    after: func(promptresult: string) -> string;
+}
+
+world promptmodifier {
+  export promptmodification;
+}
+
+world promptmodifierhost {
+  import promptmodification;
+}
