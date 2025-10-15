@@ -17,7 +17,7 @@ const COMPONENT_FILE_NAME: &str = "component.wasm";
 struct Job {
     id: Uuid,
     r#type: JobType,
-    source_directory: PathBuf,
+    source: PathBuf,
     language: Option<ProgrammingLanguages>,
     temp_dir: PathBuf,
     steps: u8,
@@ -29,7 +29,7 @@ impl Job {
         Self {
             id: Uuid::new_v4(),
             r#type: JobType::Component,
-            source_directory: PathBuf::new(),
+            source: PathBuf::new(),
             language: None,
             temp_dir: PathBuf::new(),
             steps: 0,
@@ -64,7 +64,7 @@ struct Args {
     source: String,
 
     /// Code project language
-    /// TODO Do heuristics instead,
+    /// TODO Do heuristics instead of this...
     #[arg(
         short,
         long,
@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
 
     let mut job = Job::new();
 
-    job.source_directory = PathBuf::from_str(args.source.as_str())
+    job.source = PathBuf::from_str(args.source.as_str())
         .expect(format!("Failed to parse source: {:?}", args.source).as_str());
 
     if let Some(language) = args.language {
@@ -93,10 +93,7 @@ async fn main() -> Result<()> {
 
     job.temp_dir = env::temp_dir().join(job.id.to_string());
 
-    println!(
-        "Processing {:?}, as job-id: {:?}",
-        job.source_directory, job.id
-    );
+    println!("Processing {:?}, as job-id: {:?}", job.source, job.id);
 
     println!("Temporary directory: {:?}", job.temp_dir);
 
@@ -121,7 +118,9 @@ async fn main() -> Result<()> {
     // Composing the components together
     job.current_step += 1;
     println!("{}/{}: Creating the component", job.current_step, job.steps);
-    compose_components(&job)?;
+    compose_components(&job)
+        .await
+        .expect("Failed to compose components");
     println!("Done!");
 
     Ok(())
@@ -146,11 +145,7 @@ async fn prep_app_modules(job: &Job) -> Result<()> {
     match job.language {
         Some(ProgrammingLanguages::Python) => {
             // Copy source app to temp directory
-            copy_dir_contents(
-                job.source_directory.clone(),
-                job.temp_dir.join("component-input"),
-            )
-            .await?;
+            copy_dir_contents(job.source.clone(), job.temp_dir.join("component-input")).await?;
 
             // Copy python module wrapper to temp directory
             let pyhton_module_file = include_bytes!("../includes/python_module.py");
@@ -172,8 +167,7 @@ async fn prep_app_modules(job: &Job) -> Result<()> {
 
 /// Takes a Job object and returns a Result
 async fn build_python_component(job: &Job) -> Result<()> {
-    // TODO: install dependencies
-    // requirements.py
+    // TODO: Support installing dependencies defined in requirements.py
 
     let wit_file = include_bytes!("../includes/world.wit");
     fs::write(job.temp_dir.join("world.wit"), wit_file)
@@ -229,24 +223,45 @@ async fn build_python_component(job: &Job) -> Result<()> {
 }
 
 /// WAC the components together
-fn compose_components(job: &Job) -> Result<()> {
+async fn compose_components(job: &Job) -> Result<()> {
     let prompt_modifier_path = job
         .temp_dir
         .join(COMPONENT_OUTPUT_FOLDER_NAME)
         .join(COMPONENT_FILE_NAME);
 
-    let http_handler_file = include_bytes!("../includes/temp_goal_rust.wasm");
+    if job.r#type == JobType::Component {
+        if !(prompt_modifier_path.exists()) {
+            fs::create_dir_all(prompt_modifier_path.clone().parent().unwrap())
+                .await
+                .expect(
+                    format!("Failed to create dir: {:?}", prompt_modifier_path.clone()).as_str(),
+                );
+            fs::copy(job.source.clone(), prompt_modifier_path.clone())
+                .await
+                .expect(
+                    format!(
+                        "Failed to copy source wasm: {:?} to: {:?}",
+                        job.source,
+                        prompt_modifier_path.clone()
+                    )
+                    .as_str(),
+                );
+        };
+    };
 
     println!("Prompt Modifier: {:?}", prompt_modifier_path);
 
     let mut graph = CompositionGraph::new();
 
     // Register the package dependencies into the graph
-    let package: Package =
+    let user_package =
         Package::from_file("app", None, prompt_modifier_path, graph.types_mut()).unwrap();
-    let prompt_modifier = graph.register_package(package).unwrap();
-    let package = Package::from_bytes("host", None, http_handler_file, graph.types_mut()).unwrap();
-    let http_handler = graph.register_package(package).unwrap();
+    let prompt_modifier = graph.register_package(user_package).unwrap();
+
+    let http_handler_file = include_bytes!("../includes/temp_goal_rust.wasm");
+    let host_package =
+        Package::from_bytes("host", None, http_handler_file, graph.types_mut()).unwrap();
+    let http_handler = graph.register_package(host_package).unwrap();
 
     // Instantiate the prompt modifier instance which does not have any arguments
     let prompt_modifier_instance = graph.instantiate(prompt_modifier);
