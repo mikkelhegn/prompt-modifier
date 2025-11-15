@@ -1,6 +1,6 @@
 # Securely running un-trusted code using WebAssembly and Rust
 
-This ia sample showcasing the following:
+This is a sample showcasing the following:
 
 1. You can compile Python code, written against a defined interface
 1. The compiled component can be composed in an existing app (LLM pre-processing and post-processing)
@@ -26,3 +26,6 @@ mv composed.wasm ../spin-app-template/
 cd ../spin-app-template/
 spin up
 ```
+## Build instructions
+
+This project relies on `componentize-py` as a dependency. `componentize-py` does not publish crates at this point, so you need to build it along side. Make sure to check the pre-reqs for building `componentize-py` here: https://github.com/bytecodealliance/componentize-py/blob/main/CONTRIBUTING.md
