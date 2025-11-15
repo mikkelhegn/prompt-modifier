@@ -1,145 +1,252 @@
-use anyhow::Result;
-use clap::Parser;
-use std::{collections::HashMap, path::Path, str::FromStr};
-use tokio::{
-    fs,
-    io::{self, AsyncWriteExt},
+use anyhow::{Ok, Result, anyhow};
+use clap::{Parser, ValueEnum};
+use glob::glob;
+use std::{
+    collections::HashMap,
+    env,
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    str::FromStr,
 };
+use tokio::fs;
 use uuid::Uuid;
 use wac_graph::{CompositionGraph, EncodeOptions, types::Package};
+
+const COMPONENT_INPUT_FOLDER_NAME: &str = "component-input";
+const COMPONENT_OUTPUT_FOLDER_NAME: &str = "component-output";
+const COMPONENT_FILE_NAME: &str = "component.wasm";
+
+#[derive(Clone)]
+struct Job {
+    id: Uuid,
+    source_path: PathBuf,
+    language: Option<CodeLanguages>,
+    temp_dir: PathBuf,
+}
+
+impl Job {
+    fn new() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            source_path: PathBuf::new(),
+            language: None,
+            temp_dir: PathBuf::new(),
+        }
+    }
+}
+
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+enum CodeLanguages {
+    Python,
+    JavaScript,
+    TypeScript,
+    Wasm,
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
-    /// Name of the python file
-    #[arg(short, long)]
-    file: String,
+    /// Source, component or directory with app
+    #[arg(
+        short,
+        long,
+        help = "Use this to provide the path to your code project directory or a component."
+    )]
+    source_path: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let uuid = Uuid::new_v4();
 
-    println!("Processing {}, as job-id: {:?}", args.file, uuid);
+    let mut job = Job::new();
 
-    let files_path = Path::new(&args.file);
+    job.source_path = PathBuf::from_str(args.source_path.as_str())
+        .expect(format!("Failed to parse source argument: {:?}", args.source_path).as_str());
 
-    match files_path.extension() {
-        Some(ext) if ext == "wasm" => {
-            println!("This is a .wasm file, going straight to composition");
-
-            // Generate the composed component using WAC
-            let composed_component = compose_components(files_path.to_str().expect("Coudl not extract wasm file path")).await;
-            
-            println!("Result: {}", composed_component.unwrap());
-            Ok(())
+    job.language = match figure_language(&job) {
+        Some(l) => {
+            println!("I think this is a {:?} component / program", l);
+            Some(l)
         }
-        Some(ext) if ext == "py" => {
-            println!("This is a .py file, let's prep, compile and compose.");
-            // Prep the Python app. Wrap the two module before and after in a Class compatible with exporting the WIT interfaces defined
-            let prepped_app = prep_app_modules(
-                &String::from_str(files_path.parent().unwrap().to_str().unwrap())?,
-                uuid,
-            )
-            .await?;
+        None => return Err(anyhow!("Language not supported")),
+    };
 
-            // Create a component out of the Python application
-            let component = build_python_component(&prepped_app.as_str(), uuid).await;
+    let mut job_steps = 1;
+    let mut current_step = 0;
 
-            // Generate the composed component using WAC
-            let composed_component = compose_components(component.unwrap().as_str()).await;
+    if job
+        .clone()
+        .language
+        .is_some_and(|l| l != CodeLanguages::Wasm)
+    {
+        job_steps = 3
+    };
 
-            println!("Result: {}", composed_component.unwrap());
-            Ok(())
-        }
-        Some(_) | None => {
-            println!("No file extension found");
-            Ok(())
+    job.temp_dir = env::temp_dir().join(job.id.to_string());
+
+    println!("Processing {:?}, as job-id: {:?}", job.source_path, job.id);
+
+    println!("Temporary directory: {:?}", job.temp_dir);
+
+    // Checks what steps to take given the input file that was provided
+    if job
+        .language
+        .clone()
+        .is_some_and(|l| l != CodeLanguages::Wasm)
+    {
+        // Prep the app
+        current_step += 1;
+        println!(
+            "{}/{}: Preparing the {:?} app",
+            current_step, job_steps, job.language
+        );
+        prep_app_modules(&job).await?;
+        println!("Done");
+
+        // Create a component out of the application
+        current_step += 1;
+        println!("{}/{}: Creating the component", current_step, job_steps);
+        build_component(&job).await?;
+        println!("Done");
+    }
+
+    // Composing the components together
+    current_step += 1;
+    println!("{}/{}: Creating the component", current_step, job_steps);
+    compose_components(&job)
+        .await
+        .expect("Failed to compose components");
+    println!("Done!");
+
+    Ok(())
+}
+
+/// Heuristics to define the programming language
+fn figure_language(job: &Job) -> Option<CodeLanguages> {
+    match job.source_path.extension() {
+        Some(ext) => match OsStr::to_ascii_lowercase(ext).to_str() {
+            Some("wasm") => {
+                return Some(CodeLanguages::Wasm);
+            }
+            _ => {
+                println!(
+                    "Only `.wasm` files supported. It looks like you didn't proivde a `.wasm` file, or a directory as the source."
+                );
+                return None;
+            }
+        },
+        None => {
+            let path = job.source_path.to_str().unwrap();
+            if glob(format!("{path}/**/*.py").as_str())
+                .expect("No files in the directory")
+                .count()
+                > 0
+            {
+                return Some(CodeLanguages::Python);
+            } else if glob(format!("{path}/**/*.js").as_str())
+                .expect("No files in the directory")
+                .count()
+                > 0
+            {
+                return Some(CodeLanguages::JavaScript);
+            } else {
+                println!("Didn't find a supported code language.");
+                return None;
+            }
         }
     }
 }
 
-async fn prep_app_modules(directory: &String, uuid: Uuid) -> Result<String> {
-    let template_path = "python_template_modules.liquid";
-    let template = fs::read_to_string(template_path)
-        .await
-        .expect("Failed to read teamplaet file");
-
-    // Build imports
-    let imports = format!(
-        "from {} import before\nfrom {} import after",
-        "before", "after"
-    );
-
-    // Replace {{ imports }}
-    let output_file_content = template.replace("{{ imports }}", &imports);
-
-    // Save on temp disk with UUID-based path
-    let path_string = format!("temp/{}/component-input/app.py", uuid);
-    let output_file_path = Path::new(&path_string);
-    save_to_disk(output_file_path, output_file_content.as_bytes())
-        .await
-        .expect("Failed to save file");
-
-    // Copy all modules
-    copy_dir_contents(
-        directory,
-        output_file_path
-            .parent()
-            .unwrap()
-            .to_str()
-            .expect("Failed to get parent dir"),
-    )
-    .await?;
-
-    // TODO return file content as bytes
-    Ok(path_string)
+/// Takes a Job as argument and build a component for the job
+async fn build_component(job: &Job) -> Result<()> {
+    match job.language {
+        Some(CodeLanguages::Python) => {
+            return build_python_component(job).await;
+        }
+        Some(CodeLanguages::JavaScript) | Some(CodeLanguages::TypeScript) => {
+            todo!("JavaScript or TypeScript not supported - yet!")
+        }
+        _ => panic!("No programming language provided"),
+    }
 }
 
-async fn build_python_component(src_paths: &str, uuid: Uuid) -> Result<String> {
-    // TODO: install dependencies
-    // requirements.py
+/// Takes a Job as argument and prepares the application
+async fn prep_app_modules(job: &Job) -> Result<()> {
+    // Check programming language
+    match job.language {
+        Some(CodeLanguages::Python) => {
+            // Copy source app to temp directory
+            copy_dir_contents(
+                job.source_path.clone(),
+                job.temp_dir.join("component-input"),
+            )
+            .await?;
 
-    let bindings_path_string = format!("temp/{}/component-input/promptmodifier", uuid);
-    let bindings_output_file_path = Path::new(&bindings_path_string);
+            // Copy python module wrapper to temp directory
+            let pyhton_module_file = include_bytes!("../includes/python_module.py");
+            fs::write(
+                job.temp_dir.join("component-input/python_module.py"),
+                pyhton_module_file,
+            )
+            .await
+            .expect("Failed to copy Python mpdule file");
 
+            Ok(())
+        }
+        Some(CodeLanguages::JavaScript) | Some(CodeLanguages::TypeScript) => {
+            todo!("JavaScript or TypeScript not supported - yet!")
+        }
+        _ => panic!("No programming language provided"),
+    }
+}
+
+/// Takes a Job object and returns a Result
+async fn build_python_component(job: &Job) -> Result<()> {
+    // TODO: Support installing dependencies defined in requirements.py
+
+    let wit_file = include_bytes!("../includes/world.wit");
+    fs::write(job.temp_dir.join("world.wit"), wit_file)
+        .await
+        .expect("Failed to copy world.wit file.");
+
+    // Generating bindings
     componentize_py::generate_bindings(
-        Path::new("../shared/wit"),
+        &[job.temp_dir.join("world.wit")],
         Some("promptmodifier"),
         &[],
         false,
         None,
-        bindings_output_file_path,
+        job.temp_dir
+            .join(format!("{}/promptmodifier", COMPONENT_INPUT_FOLDER_NAME))
+            .as_path(),
         &HashMap::new(),
         &HashMap::new(),
     )
     .expect("Failed to genereate bindings");
 
-    // componentize
-    let component_path_string = format!("temp/{}/component-output/component.wasm", uuid);
-    let component_output_file_path = Path::new(&component_path_string);
-    fs::create_dir_all(component_output_file_path.parent().unwrap())
+    // Create the component
+    fs::create_dir_all(job.temp_dir.join(COMPONENT_OUTPUT_FOLDER_NAME))
         .await
         .expect("Failed to create output dir");
 
-    let python_app_directory = Path::new(src_paths);
-    println!("Python app directory {:?}", python_app_directory);
-
     componentize_py::componentize(
-        Some(Path::new("../shared/wit")),
+        &[job.temp_dir.join("world.wit")],
         Some("promptmodifier"),
         &[],
         false,
         None,
-        &[python_app_directory
-            .parent()
-            .unwrap()
+        &[job
+            .temp_dir
+            .join(COMPONENT_INPUT_FOLDER_NAME)
             .to_str()
-            .expect("Failed to find parent direcoty of the Python app")],
+            .ok_or("Failed to parse component temp folder")
+            .unwrap()],
         &[],
-        "app",
-        component_output_file_path,
+        "python_module",
+        &job.temp_dir
+            .join(COMPONENT_OUTPUT_FOLDER_NAME)
+            .join(COMPONENT_FILE_NAME),
         None,
         true,
         &HashMap::new(),
@@ -148,32 +255,53 @@ async fn build_python_component(src_paths: &str, uuid: Uuid) -> Result<String> {
     .await
     .expect("Failed to generate Python component");
 
-    Ok(component_path_string)
+    Ok(())
 }
 
-async fn compose_components(component_path: &str) -> Result<String> {
-    // WAC the components together...
-    // wac plug --plug ../examples/python-component/app.wasm target/wasm32-wasip2/release/temp_goal_rust.wasm -o composed.wasm
-    // save to (temp/{GUID}/spin-app-output)
-    let spin_template_app_component_path =
-        Path::new("../spin-app-template/target/wasm32-wasip2/release/temp_goal_rust.wasm");
-    assert!(!Path::new("does_not_exist.txt").exists());
-    wac_it(Path::new(component_path), spin_template_app_component_path);
+/// WAC the components together
+async fn compose_components(job: &Job) -> Result<()> {
+    let prompt_modifier_path = job
+        .temp_dir
+        .join(COMPONENT_OUTPUT_FOLDER_NAME)
+        .join(COMPONENT_FILE_NAME);
 
-    Ok("WAC'ed it!".to_string())
-}
+    if job
+        .language
+        .as_ref()
+        .is_some_and(|l| l == &CodeLanguages::Wasm)
+    {
+        if !(prompt_modifier_path.exists()) {
+            fs::create_dir_all(prompt_modifier_path.clone().parent().unwrap())
+                .await
+                .expect(
+                    format!("Failed to create dir: {:?}", prompt_modifier_path.clone()).as_str(),
+                );
+            fs::copy(job.source_path.clone(), prompt_modifier_path.clone())
+                .await
+                .expect(
+                    format!(
+                        "Failed to copy source wasm: {:?} to: {:?}",
+                        job.source_path,
+                        prompt_modifier_path.clone()
+                    )
+                    .as_str(),
+                );
+        };
+    };
 
-fn wac_it(prompt_modifier_path: &Path, http_handler_path: &Path) {
     println!("Prompt Modifier: {:?}", prompt_modifier_path);
-    println!("HTTP Handler: {:?}", http_handler_path);
 
     let mut graph = CompositionGraph::new();
 
     // Register the package dependencies into the graph
-    let package = Package::from_file("app", None, prompt_modifier_path, graph.types_mut()).unwrap();
-    let prompt_modifier = graph.register_package(package).unwrap();
-    let package = Package::from_file("host", None, http_handler_path, graph.types_mut()).unwrap();
-    let http_handler = graph.register_package(package).unwrap();
+    let user_package =
+        Package::from_file("app", None, prompt_modifier_path, graph.types_mut()).unwrap();
+    let prompt_modifier = graph.register_package(user_package).unwrap();
+
+    let http_handler_file = include_bytes!("../includes/temp_goal_rust.wasm");
+    let host_package =
+        Package::from_bytes("host", None, http_handler_file, graph.types_mut()).unwrap();
+    let http_handler = graph.register_package(host_package).unwrap();
 
     // Instantiate the prompt modifier instance which does not have any arguments
     let prompt_modifier_instance = graph.instantiate(prompt_modifier);
@@ -205,47 +333,38 @@ fn wac_it(prompt_modifier_path: &Path, http_handler_path: &Path) {
 
     // Encode the graph into a WASM binary
     let encoding = graph.encode(EncodeOptions::default()).unwrap();
-    std::fs::write("../spin-app-template/composed.wasm", encoding).unwrap();
+    // TODO: Enable choice of output location
+    std::fs::write(PathBuf::from("./composed.wasm"), encoding)
+        .expect("Failed to write compose wasm file");
+
+    Ok(())
 }
 
 // Helper functions
-async fn copy_dir_contents(src: &str, dst: &str) -> io::Result<()> {
-    let src_path = Path::new(src);
-    let dst_path = Path::new(dst);
 
-    // Ensure destination directory exists
-    fs::create_dir_all(dst_path).await?;
+/// Copy all files from `src` to `dst`. Creates the `dst` directory (and all parent directories), if they do not exist.
+async fn copy_dir_contents(src: PathBuf, dst: PathBuf) -> Result<()> {
+    let src_path = Path::new(&src);
+    let dst_path = Path::new(&dst);
 
-    let mut entries = fs::read_dir(src_path).await?;
+    fs::create_dir_all(dst_path)
+        .await
+        .expect(format!("Failed to create directory: {:?}", dst_path).as_str());
+
+    let mut entries = fs::read_dir(src_path)
+        .await
+        .expect(format!("Failed to read directory: {:?}", src_path).as_str());
+
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.is_file() {
             let file_name = entry.file_name();
             let dst_file = dst_path.join(file_name);
-            fs::copy(&path, &dst_file).await?;
+            fs::copy(&path, &dst_file)
+                .await
+                .expect(format!("Failed to copy file: {:?} to: {:?} ", &path, &dst_file).as_str());
         }
     }
 
-    Ok(())
-}
-
-async fn save_to_disk(
-    output_file_path: &Path,
-    output_file_content: &[u8],
-) -> Result<(), anyhow::Error> {
-    fs::create_dir_all(
-        output_file_path
-            .parent()
-            .expect("Could not extract paretn dir"),
-    )
-    .await
-    .expect("Failed to create directory");
-    let mut output_file = fs::File::create(output_file_path)
-        .await
-        .expect("Failed to create output file");
-    output_file
-        .write_all(output_file_content)
-        .await
-        .expect("Feild to write to file");
     Ok(())
 }

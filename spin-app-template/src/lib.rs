@@ -10,8 +10,16 @@ wit_bindgen::generate!({
 });
 
 #[http_component]
-async fn handle_temp_goal_rust(_req: Request) -> anyhow::Result<impl IntoResponse> {
-    let userprompt = "You're a standup comedian. Tell us a joke about developers, by completing the following: Once there was a developer...";
+async fn handle_temp_goal_rust(req: Request) -> anyhow::Result<impl IntoResponse> {
+
+    let userprompt = match req.body().len() {
+        0 => {
+            "You're a standup comedian. Tell us a joke about developers, by completing the following: Once there was a developer..."
+        }
+        _ => {
+            &String::from_utf8_lossy(req.body())
+        }
+    };
 
     println!("User Prompt: {:?}", userprompt);
 
@@ -19,7 +27,10 @@ async fn handle_temp_goal_rust(_req: Request) -> anyhow::Result<impl IntoRespons
 
     println!("Modified user Prompt: {:?}", post_before_prompt);
 
-    match llm::infer(llm::InferencingModel::Llama2Chat, post_before_prompt.as_str()) {
+    match llm::infer(
+        llm::InferencingModel::Llama2Chat,
+        post_before_prompt.as_str(),
+    ) {
         Ok(resp) => {
             println!("LLM Response: {:?}", &resp.text);
             let post_after_prompt = promptmodification::after(&resp.text);
